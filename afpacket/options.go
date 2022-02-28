@@ -82,6 +82,14 @@ type OptBlockSize int
 // It can be passed into NewTPacket.
 type OptNumBlocks int
 
+// RxRingOptions is the collection of options for TPacket's rx ring
+// It can be passed into NewTPacket.
+type RxRingOptions RingOptions
+
+// TxRingOptions is the collection of options for TPacket's tx ring
+// It can be passed into NewTPacket.
+type TxRingOptions RingOptions
+
 // OptBlockTimeout is TPacket v3's tp_retire_blk_tov.  Note that it has only millisecond granularity, so must be >= 1 ms.
 // It can be passed into NewTPacket.
 type OptBlockTimeout time.Duration
@@ -115,23 +123,37 @@ const (
 	DefaultPollTimeout  = -1 * time.Millisecond  // Default value for OptPollTimeout. This blocks forever.
 )
 
-type options struct {
-	frameSize      int
+type RingOptions struct {
+	FrameSize      int
+	BlockSize      int
+	NumBlocks      int
 	framesPerBlock int
-	blockSize      int
-	numBlocks      int
-	addVLANHeader  bool
-	blockTimeout   time.Duration
-	pollTimeout    time.Duration
-	version        OptTPacketVersion
-	socktype       OptSocketType
-	iface          string
+}
+
+type options struct {
+	rxRing        RingOptions
+	txRing        RingOptions
+	addVLANHeader bool
+	blockTimeout  time.Duration
+	pollTimeout   time.Duration
+	version       OptTPacketVersion
+	socktype      OptSocketType
+	iface         string
 }
 
 var defaultOpts = options{
-	frameSize:    DefaultFrameSize,
-	blockSize:    DefaultBlockSize,
-	numBlocks:    DefaultNumBlocks,
+	rxRing: RingOptions{
+		FrameSize:      DefaultFrameSize,
+		BlockSize:      DefaultBlockSize,
+		NumBlocks:      DefaultNumBlocks,
+		framesPerBlock: DefaultBlockSize / DefaultFrameSize,
+	},
+	txRing: RingOptions{
+		FrameSize:      DefaultFrameSize,
+		BlockSize:      DefaultBlockSize,
+		NumBlocks:      DefaultNumBlocks,
+		framesPerBlock: DefaultBlockSize / DefaultFrameSize,
+	},
 	blockTimeout: DefaultBlockTimeout,
 	pollTimeout:  DefaultPollTimeout,
 	version:      TPacketVersionHighestAvailable,
@@ -142,12 +164,12 @@ func parseOptions(opts ...interface{}) (ret options, err error) {
 	ret = defaultOpts
 	for _, opt := range opts {
 		switch v := opt.(type) {
-		case OptFrameSize:
-			ret.frameSize = int(v)
-		case OptBlockSize:
-			ret.blockSize = int(v)
-		case OptNumBlocks:
-			ret.numBlocks = int(v)
+		case RxRingOptions:
+			ret.rxRing = RingOptions(v)
+			ret.rxRing.framesPerBlock = v.BlockSize / v.FrameSize
+		case TxRingOptions:
+			ret.txRing = RingOptions(v)
+			ret.txRing.framesPerBlock = v.BlockSize / v.FrameSize
 		case OptBlockTimeout:
 			ret.blockTimeout = time.Duration(v)
 		case OptPollTimeout:
@@ -168,17 +190,21 @@ func parseOptions(opts ...interface{}) (ret options, err error) {
 	if err = ret.check(); err != nil {
 		return
 	}
-	ret.framesPerBlock = ret.blockSize / ret.frameSize
+
 	return
 }
 func (o options) check() error {
 	switch {
-	case o.blockSize%pageSize != 0:
-		return fmt.Errorf("block size %d must be divisible by page size %d", o.blockSize, pageSize)
-	case o.blockSize%o.frameSize != 0:
-		return fmt.Errorf("block size %d must be divisible by frame size %d", o.blockSize, o.frameSize)
-	case o.numBlocks < 1:
-		return fmt.Errorf("num blocks %d must be >= 1", o.numBlocks)
+	case o.rxRing.BlockSize%pageSize != 0:
+		return fmt.Errorf("rx ring: block size %d must be divisible by page size %d", o.rxRing.BlockSize, pageSize)
+	case o.rxRing.BlockSize%o.rxRing.FrameSize != 0:
+		return fmt.Errorf("rx ring: block size %d must be divisible by frame size %d", o.rxRing.BlockSize, o.rxRing.FrameSize)
+	case o.txRing.BlockSize%pageSize != 0:
+		return fmt.Errorf("tx ring: block size %d must be divisible by page size %d", o.txRing.BlockSize, pageSize)
+	case o.txRing.BlockSize%o.txRing.FrameSize != 0:
+		return fmt.Errorf("tx ring: block size %d must be divisible by frame size %d", o.txRing.BlockSize, o.txRing.FrameSize)
+	case o.rxRing.NumBlocks < 1 && o.txRing.NumBlocks < 1:
+		return fmt.Errorf("num blocks of both rx and tx rings cannot be < 1 at the same time")
 	case o.blockTimeout < time.Millisecond:
 		return fmt.Errorf("block timeout %v must be > %v", o.blockTimeout, time.Millisecond)
 	case o.version < tpacketVersionMin || o.version > tpacketVersionMax:
