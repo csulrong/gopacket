@@ -50,7 +50,7 @@ var ErrPoll = errors.New("packet poll failed")
 var ErrTimeout = errors.New("packet poll timeout expired")
 
 // ErrFill returned on filling packet to tx ring
-var ErrFill = errors.New("no available slot for filling packet")
+var ErrFill = errors.New("no available frames for filling packet")
 
 // AncillaryVLAN structures are used to pass the captured VLAN
 // as ancillary data via CaptureInfo.
@@ -106,6 +106,8 @@ type TPacket struct {
 	stats Stats
 	// fd is the C file descriptor.
 	fd int
+	// ring points to the memory space which is a continuous buffer for both rx and tx ring.
+	ring []byte
 	// rxRing points to the memory space of the rx ring buffer shared by tpacket and the kernel.
 	rxRing []byte
 	// rawRxRing is the unsafe pointer that we use to poll for incoming packets
@@ -126,8 +128,6 @@ type TPacket struct {
 	txMu sync.Mutex
 	// txOffset is the offset into the tx ring of the current header.
 	txOffset int
-	// txCurrent is the current header for tx.
-	txCurrent header
 	// shouldReleasePacket is set to true whenever we return packet data, to make sure we remember to release that data back to the kernel.
 	shouldReleasePacket bool
 	// headerNextNeeded is set to true when header need to move to the next packet. No need to move it case of poll error.
@@ -138,7 +138,7 @@ type TPacket struct {
 	// getTPacketHeader, and we don't want to allocate a v3wrapper every time,
 	// so we leave it in the TPacket object and return a pointer to it.
 	v3Rx v3wrapper
-	// v3Tx
+	// v3Tx holds pointer to frame in tx-ring for transmitting packet
 	v3Tx v3wrapper
 
 	statsMu sync.Mutex // guards stats below
@@ -193,31 +193,31 @@ func (h *TPacket) setRequestedTPacketVersion() error {
 
 // setUpRing sets up the shared-memory ring buffer between the user process and the kernel.
 func (h *TPacket) setUpRing() (err error) {
-	totalRxSize := int(h.opts.rxRing.framesPerBlock * h.opts.rxRing.numBlocks * h.opts.rxRing.frameSize)
-	totalTxSize := int(h.opts.txRing.framesPerBlock * h.opts.txRing.numBlocks * h.opts.txRing.frameSize)
+	totalRxSize := int(h.opts.rxRing.framesPerBlock * h.opts.rxRing.NumBlocks * h.opts.rxRing.FrameSize)
+	totalTxSize := int(h.opts.txRing.framesPerBlock * h.opts.txRing.NumBlocks * h.opts.txRing.FrameSize)
 	totalSize := totalRxSize + totalTxSize
 
 	switch h.tpVersion {
 	case TPacketVersion1, TPacketVersion2:
 		// setup rx ring
-		if h.opts.rxRing.numBlocks > 0 {
+		if h.opts.rxRing.NumBlocks > 0 {
 			var tp C.struct_tpacket_req
-			tp.tp_block_size = C.uint(h.opts.rxRing.blockSize)
-			tp.tp_block_nr = C.uint(h.opts.rxRing.numBlocks)
-			tp.tp_frame_size = C.uint(h.opts.rxRing.frameSize)
-			tp.tp_frame_nr = C.uint(h.opts.rxRing.framesPerBlock * h.opts.rxRing.numBlocks)
+			tp.tp_block_size = C.uint(h.opts.rxRing.BlockSize)
+			tp.tp_block_nr = C.uint(h.opts.rxRing.NumBlocks)
+			tp.tp_frame_size = C.uint(h.opts.rxRing.FrameSize)
+			tp.tp_frame_nr = C.uint(h.opts.rxRing.framesPerBlock * h.opts.rxRing.NumBlocks)
 			if err := setsockopt(h.fd, unix.SOL_PACKET, unix.PACKET_RX_RING, unsafe.Pointer(&tp), unsafe.Sizeof(tp)); err != nil {
 				return fmt.Errorf("setsockopt packet_rx_ring: %v", err)
 			}
 		}
 
 		// setup tx ring
-		if h.opts.txRing.numBlocks > 0 {
+		if h.opts.txRing.NumBlocks > 0 {
 			var tp C.struct_tpacket_req
-			tp.tp_block_size = C.uint(h.opts.txRing.blockSize)
-			tp.tp_block_nr = C.uint(h.opts.txRing.numBlocks)
-			tp.tp_frame_size = C.uint(h.opts.txRing.frameSize)
-			tp.tp_frame_nr = C.uint(h.opts.txRing.framesPerBlock * h.opts.txRing.numBlocks)
+			tp.tp_block_size = C.uint(h.opts.txRing.BlockSize)
+			tp.tp_block_nr = C.uint(h.opts.txRing.NumBlocks)
+			tp.tp_frame_size = C.uint(h.opts.txRing.FrameSize)
+			tp.tp_frame_nr = C.uint(h.opts.txRing.framesPerBlock * h.opts.txRing.NumBlocks)
 			if err := setsockopt(h.fd, unix.SOL_PACKET, unix.PACKET_TX_RING, unsafe.Pointer(&tp), unsafe.Sizeof(tp)); err != nil {
 				return fmt.Errorf("setsockopt packet_tx_ring: %v", err)
 			}
@@ -225,12 +225,12 @@ func (h *TPacket) setUpRing() (err error) {
 
 	case TPacketVersion3:
 		// setup v3 rx ring
-		if h.opts.rxRing.numBlocks > 0 {
+		if h.opts.rxRing.NumBlocks > 0 {
 			var tp C.struct_tpacket_req3
-			tp.tp_block_size = C.uint(h.opts.rxRing.blockSize)
-			tp.tp_block_nr = C.uint(h.opts.rxRing.numBlocks)
-			tp.tp_frame_size = C.uint(h.opts.rxRing.frameSize)
-			tp.tp_frame_nr = C.uint(h.opts.rxRing.framesPerBlock * h.opts.rxRing.numBlocks)
+			tp.tp_block_size = C.uint(h.opts.rxRing.BlockSize)
+			tp.tp_block_nr = C.uint(h.opts.rxRing.NumBlocks)
+			tp.tp_frame_size = C.uint(h.opts.rxRing.FrameSize)
+			tp.tp_frame_nr = C.uint(h.opts.rxRing.framesPerBlock * h.opts.rxRing.NumBlocks)
 			tp.tp_retire_blk_tov = C.uint(h.opts.blockTimeout / time.Millisecond)
 			if err := setsockopt(h.fd, unix.SOL_PACKET, unix.PACKET_RX_RING, unsafe.Pointer(&tp), unsafe.Sizeof(tp)); err != nil {
 				return fmt.Errorf("setsockopt packet_rx_ring v3: %v", err)
@@ -238,12 +238,12 @@ func (h *TPacket) setUpRing() (err error) {
 		}
 
 		// setup v3 tx ring
-		if h.opts.txRing.numBlocks > 0 {
+		if h.opts.txRing.NumBlocks > 0 {
 			var tp C.struct_tpacket_req3
-			tp.tp_block_size = C.uint(h.opts.txRing.blockSize)
-			tp.tp_block_nr = C.uint(h.opts.txRing.numBlocks)
-			tp.tp_frame_size = C.uint(h.opts.txRing.frameSize)
-			tp.tp_frame_nr = C.uint(h.opts.txRing.framesPerBlock * h.opts.txRing.numBlocks)
+			tp.tp_block_size = C.uint(h.opts.txRing.BlockSize)
+			tp.tp_block_nr = C.uint(h.opts.txRing.NumBlocks)
+			tp.tp_frame_size = C.uint(h.opts.txRing.FrameSize)
+			tp.tp_frame_nr = C.uint(h.opts.txRing.framesPerBlock * h.opts.txRing.NumBlocks)
 			tp.tp_retire_blk_tov = C.uint(h.opts.blockTimeout / time.Millisecond)
 			if err := setsockopt(h.fd, unix.SOL_PACKET, unix.PACKET_TX_RING, unsafe.Pointer(&tp), unsafe.Sizeof(tp)); err != nil {
 				return fmt.Errorf("setsockopt packet_rx_ring v3: %v", err)
@@ -257,17 +257,17 @@ func (h *TPacket) setUpRing() (err error) {
 	// https://www.kernel.org/doc/html/latest/networking/packet_mmap.html
 	// To use one socket for capture and transmission, the mapping of both the RX and TX buffer ring
 	// has to be done with one call to mmap
-	ring, err := unix.Mmap(h.fd, 0, totalSize, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	h.ring, err := unix.Mmap(h.fd, 0, totalSize, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
 	if err != nil {
 		return err
 	}
-	if ring == nil {
+	if h.ring == nil {
 		return errors.New("no ring")
 	}
-	h.rxRing = ring[:totalRxSize]
+	h.rxRing = h.ring[:totalRxSize]
 	h.rawRxRing = unsafe.Pointer(&h.rxRing[0])
 
-	h.txRing = ring[totalRxSize:]
+	h.txRing = h.ring[totalRxSize:]
 	h.rawTxRing = unsafe.Pointer(&h.txRing[0])
 
 	return nil
@@ -278,9 +278,10 @@ func (h *TPacket) Close() {
 	if h.fd == -1 {
 		return // already closed.
 	}
-	if h.rxRing != nil {
-		unix.Munmap(h.rxRing)
+	if h.ring != nil {
+		unix.Munmap(h.ring)
 	}
+	h.ring = nil
 	h.rxRing = nil
 	h.txRing = nil
 	unix.Close(h.fd)
@@ -298,7 +299,13 @@ func NewTPacket(opts ...interface{}) (h *TPacket, err error) {
 	if h.opts, err = parseOptions(opts...); err != nil {
 		return nil, err
 	}
-	fd, err := unix.Socket(unix.AF_PACKET, int(h.opts.socktype), int(htons(unix.ETH_P_ALL)))
+	var proto int = int(htons(unix.ETH_P_ALL))
+	if h.opts.rxRing.NumBlocks == 0 {
+		// only created for transmission, set protocol to zero to avoid an expensive call
+		// to packet_rcv() in kernel
+		proto = 0
+	}
+	fd, err := unix.Socket(unix.AF_PACKET, int(h.opts.socktype), proto)
 	if err != nil {
 		return nil, err
 	}
@@ -337,7 +344,7 @@ func (h *TPacket) SetBPF(filter []bpf.RawInstruction) error {
 
 func (h *TPacket) releaseCurrentPacket() error {
 	h.rxCurrent.clearStatus()
-	h.offset++
+	h.rxOffset++
 	h.shouldReleasePacket = false
 	return nil
 }
@@ -360,7 +367,7 @@ retry:
 		if h.shouldReleasePacket {
 			h.releaseCurrentPacket()
 		}
-		h.rxCurrent = h.getTPacketHeader()
+		h.rxCurrent = h.getTPacketHeader(true)
 		if err = h.pollForFirstPacket(h.rxCurrent); err != nil {
 			h.headerNextNeeded = false
 			h.rxMu.Unlock()
@@ -485,9 +492,9 @@ func (h *TPacket) ReadPacketData() (data []byte, ci gopacket.CaptureInfo, err er
 }
 
 func (h *TPacket) getTPacketHeader(rx bool) header {
+	var position uintptr
 	switch h.tpVersion {
 	case TPacketVersion1:
-		var position uintptr
 		if rx {
 			if h.rxOffset >= h.opts.rxRing.framesPerBlock*h.opts.rxRing.NumBlocks {
 				h.rxOffset = 0
@@ -501,7 +508,6 @@ func (h *TPacket) getTPacketHeader(rx bool) header {
 		}
 		return (*v1header)(unsafe.Pointer(position))
 	case TPacketVersion2:
-		var position uintptr
 		if rx {
 			if h.rxOffset >= h.opts.rxRing.framesPerBlock*h.opts.rxRing.NumBlocks {
 				h.rxOffset = 0
@@ -516,7 +522,6 @@ func (h *TPacket) getTPacketHeader(rx bool) header {
 		return (*v2header)(unsafe.Pointer(position))
 	case TPacketVersion3:
 		// TPacket3 uses each block to return values, instead of each frame.  Hence we need to rotate when we hit #blocks, not #frames.
-		var position uintptr
 		if rx {
 			if h.rxOffset >= h.opts.rxRing.NumBlocks {
 				h.rxOffset = 0
@@ -528,6 +533,7 @@ func (h *TPacket) getTPacketHeader(rx bool) header {
 			if h.txOffset >= h.opts.txRing.framesPerBlock*h.opts.txRing.NumBlocks {
 				h.txOffset = 0
 			}
+			// NOTE: txOffset points to #frame in tx ring, instead of #block like rxOffset in rx ring
 			position = uintptr(h.rawTxRing) + uintptr(h.opts.txRing.FrameSize*h.txOffset)
 			h.v3Tx = initV3Wrapper(unsafe.Pointer(position), false)
 			return &h.v3Tx
@@ -604,7 +610,7 @@ func (h *TPacket) WritePacketData(pkt []byte) error {
 	return err
 }
 
-// BypassQdisc enables bypassing kernel/s qdisc layer and forces pushing packets to driver directly.
+// BypassQdisc enables bypassing qdisc layer and forces pushing packets to driver directly.
 func (h *TPacket) BypassQdisc() error {
 	h.txMu.Lock()
 	defer h.txMu.Unlock()

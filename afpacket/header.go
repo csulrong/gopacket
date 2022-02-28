@@ -41,7 +41,7 @@ type header interface {
 	// getData returns the packet data pointed to by the current header.
 	getData(opts *options) []byte
 	// putData puts the packet data to the current header.
-	putData(data []byte) error
+	putData(data []byte)
 	// getLength returns the total length of the packet.
 	getLength() int
 	// getIfaceIndex returns the index of the network interface
@@ -98,14 +98,12 @@ func (h *v1header) getTime() time.Time {
 func (h *v1header) getData(opts *options) []byte {
 	return makeSlice(uintptr(unsafe.Pointer(h))+uintptr(h.tp_mac), int(h.tp_snaplen))
 }
-func (h *v1header) putData(data []byte) error {
+func (h *v1header) putData(data []byte) {
 	d := makeSlice(uintptr(unsafe.Pointer(h))+uintptr(tpAlign(int(C.sizeof_struct_tpacket_hdr))), len(data))
 	copy(d, data)
 	h.tp_len = uint32(len(data))
-	h.tp_snaplen = uint32(len(data))
 	h.tp_next_offset = 0
 	h.tp_status = unix.TP_STATUS_SEND_REQUEST
-	return nil
 }
 func (h *v1header) getLength() int {
 	return int(h.tp_len)
@@ -134,14 +132,12 @@ func (h *v2header) getData(opts *options) []byte {
 	data := makeSlice(uintptr(unsafe.Pointer(h))+uintptr(h.tp_mac), int(h.tp_snaplen))
 	return insertVlanHeader(data, int(h.tp_vlan_tci), opts)
 }
-func (h *v2header) putData(data []byte) error {
+func (h *v2header) putData(data []byte) {
 	d := makeSlice(uintptr(unsafe.Pointer(h))+uintptr(tpAlign(int(C.sizeof_struct_tpacket2_hdr))), len(data))
 	copy(d, data)
 	h.tp_len = uint32(len(data))
-	h.tp_snaplen = uint32(len(data))
 	h.tp_next_offset = 0
 	h.tp_status = unix.TP_STATUS_SEND_REQUEST
-	return nil
 }
 func (h *v2header) getLength() int {
 	return int(h.tp_len)
@@ -169,6 +165,7 @@ func initV3Wrapper(block unsafe.Pointer, rx bool) (w v3wrapper) {
 		w.packet = (*C.struct_tpacket3_hdr)(unsafe.Pointer(uintptr(block) + uintptr(w.blockhdr.offset_to_first_pkt)))
 		w.rx = true
 	} else {
+		// no block descriptor for tx
 		w.block = nil
 		w.blockhdr = nil
 		w.packet = (*C.struct_tpacket3_hdr)(block)
@@ -218,13 +215,12 @@ func (w *v3wrapper) getData(opts *options) []byte {
 			int(w.packet.tp_len))
 	}
 }
-func (w *v3wrapper) putData(data []byte) error {
+func (w *v3wrapper) putData(data []byte) {
 	d := makeSlice(uintptr(unsafe.Pointer(w.packet))+uintptr(tpAlign(int(C.sizeof_struct_tpacket3_hdr))), len(data))
 	copy(d, data)
 	h.tp_len = uint32(len(data))
 	h.tp_next_offset = 0
 	h.tp_status = unix.TP_STATUS_SEND_REQUEST
-	return nil
 }
 func (w *v3wrapper) getLength() int {
 	return int(w.packet.tp_len)
