@@ -101,8 +101,7 @@ func (h *v1header) getData(opts *options) []byte {
 func (h *v1header) putData(data []byte) {
 	d := makeSlice(uintptr(unsafe.Pointer(h))+uintptr(tpAlign(int(C.sizeof_struct_tpacket_hdr))), len(data))
 	copy(d, data)
-	h.tp_len = uint32(len(data))
-	h.tp_next_offset = 0
+	h.tp_len = uint(len(data))
 	h.tp_status = unix.TP_STATUS_SEND_REQUEST
 }
 func (h *v1header) getLength() int {
@@ -135,8 +134,7 @@ func (h *v2header) getData(opts *options) []byte {
 func (h *v2header) putData(data []byte) {
 	d := makeSlice(uintptr(unsafe.Pointer(h))+uintptr(tpAlign(int(C.sizeof_struct_tpacket2_hdr))), len(data))
 	copy(d, data)
-	h.tp_len = uint32(len(data))
-	h.tp_next_offset = 0
+	h.tp_len = uint(len(data))
 	h.tp_status = unix.TP_STATUS_SEND_REQUEST
 }
 func (h *v2header) getLength() int {
@@ -218,9 +216,9 @@ func (w *v3wrapper) getData(opts *options) []byte {
 func (w *v3wrapper) putData(data []byte) {
 	d := makeSlice(uintptr(unsafe.Pointer(w.packet))+uintptr(tpAlign(int(C.sizeof_struct_tpacket3_hdr))), len(data))
 	copy(d, data)
-	h.tp_len = uint32(len(data))
-	h.tp_next_offset = 0
-	h.tp_status = unix.TP_STATUS_SEND_REQUEST
+	w.tp_len = uint(len(data))
+	w.tp_next_offset = 0
+	w.tp_status = unix.TP_STATUS_SEND_REQUEST
 }
 func (w *v3wrapper) getLength() int {
 	return int(w.packet.tp_len)
