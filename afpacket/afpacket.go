@@ -257,7 +257,7 @@ func (h *TPacket) setUpRing() (err error) {
 	// https://www.kernel.org/doc/html/latest/networking/packet_mmap.html
 	// To use one socket for capture and transmission, the mapping of both the RX and TX buffer ring
 	// has to be done with one call to mmap
-	h.ring, err := unix.Mmap(h.fd, 0, totalSize, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	h.ring, err = unix.Mmap(h.fd, 0, totalSize, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
 	if err != nil {
 		return err
 	}
