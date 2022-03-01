@@ -40,6 +40,8 @@ type header interface {
 	getTime() time.Time
 	// getData returns the packet data pointed to by the current header.
 	getData(opts *options) []byte
+	// putData puts the packet data to the current header.
+	putData(data []byte)
 	// getLength returns the total length of the packet.
 	getLength() int
 	// getIfaceIndex returns the index of the network interface
@@ -96,6 +98,12 @@ func (h *v1header) getTime() time.Time {
 func (h *v1header) getData(opts *options) []byte {
 	return makeSlice(uintptr(unsafe.Pointer(h))+uintptr(h.tp_mac), int(h.tp_snaplen))
 }
+func (h *v1header) putData(data []byte) {
+	d := makeSlice(uintptr(unsafe.Pointer(h))+uintptr(tpAlign(int(C.sizeof_struct_tpacket_hdr))), len(data))
+	copy(d, data)
+	h.tp_len = C.uint(len(data))
+	h.tp_status = unix.TP_STATUS_SEND_REQUEST
+}
 func (h *v1header) getLength() int {
 	return int(h.tp_len)
 }
@@ -123,6 +131,12 @@ func (h *v2header) getData(opts *options) []byte {
 	data := makeSlice(uintptr(unsafe.Pointer(h))+uintptr(h.tp_mac), int(h.tp_snaplen))
 	return insertVlanHeader(data, int(h.tp_vlan_tci), opts)
 }
+func (h *v2header) putData(data []byte) {
+	d := makeSlice(uintptr(unsafe.Pointer(h))+uintptr(tpAlign(int(C.sizeof_struct_tpacket2_hdr))), len(data))
+	copy(d, data)
+	h.tp_len = C.uint(len(data))
+	h.tp_status = unix.TP_STATUS_SEND_REQUEST
+}
 func (h *v2header) getLength() int {
 	return int(h.tp_len)
 }
@@ -139,16 +153,31 @@ type v3wrapper struct {
 	blockhdr *C.struct_tpacket_hdr_v1
 	packet   *C.struct_tpacket3_hdr
 	used     C.__u32
+	rx       bool
 }
 
-func initV3Wrapper(block unsafe.Pointer) (w v3wrapper) {
-	w.block = (*C.struct_tpacket_block_desc)(block)
-	w.blockhdr = (*C.struct_tpacket_hdr_v1)(unsafe.Pointer(&w.block.hdr[0]))
-	w.packet = (*C.struct_tpacket3_hdr)(unsafe.Pointer(uintptr(block) + uintptr(w.blockhdr.offset_to_first_pkt)))
+func initV3Wrapper(block unsafe.Pointer, rx bool) (w v3wrapper) {
+	if rx {
+		w.block = (*C.struct_tpacket_block_desc)(block)
+		w.blockhdr = (*C.struct_tpacket_hdr_v1)(unsafe.Pointer(&w.block.hdr[0]))
+		w.packet = (*C.struct_tpacket3_hdr)(unsafe.Pointer(uintptr(block) + uintptr(w.blockhdr.offset_to_first_pkt)))
+		w.rx = true
+	} else {
+		// no block descriptor for tx
+		w.block = nil
+		w.blockhdr = nil
+		w.packet = (*C.struct_tpacket3_hdr)(block)
+		w.rx = false
+	}
+
 	return
 }
 
 func (w *v3wrapper) getVLAN() int {
+	if !w.rx {
+		return -1
+	}
+
 	if w.packet.tp_status&unix.TP_STATUS_VLAN_VALID != 0 {
 		hv1 := (*C.struct_tpacket_hdr_variant1)(unsafe.Pointer(&w.packet.anon0[0]))
 		return int(hv1.tp_vlan_tci & 0xfff)
@@ -157,28 +186,56 @@ func (w *v3wrapper) getVLAN() int {
 }
 
 func (w *v3wrapper) getStatus() int {
-	return int(w.blockhdr.block_status)
+	if w.rx {
+		return int(w.blockhdr.block_status)
+	} else {
+		return int(w.packet.tp_status)
+	}
 }
 func (w *v3wrapper) clearStatus() {
-	w.blockhdr.block_status = 0
+	if w.rx {
+		w.blockhdr.block_status = 0
+	} else {
+		w.packet.tp_status = 0
+	}
 }
 func (w *v3wrapper) getTime() time.Time {
 	return time.Unix(int64(w.packet.tp_sec), int64(w.packet.tp_nsec))
 }
 func (w *v3wrapper) getData(opts *options) []byte {
-	data := makeSlice(uintptr(unsafe.Pointer(w.packet))+uintptr(w.packet.tp_mac), int(w.packet.tp_snaplen))
-
-	hv1 := (*C.struct_tpacket_hdr_variant1)(unsafe.Pointer(&w.packet.anon0[0]))
-	return insertVlanHeader(data, int(hv1.tp_vlan_tci), opts)
+	if w.rx {
+		data := makeSlice(uintptr(unsafe.Pointer(w.packet))+uintptr(w.packet.tp_mac), int(w.packet.tp_snaplen))
+		hv1 := (*C.struct_tpacket_hdr_variant1)(unsafe.Pointer(&w.packet.anon0[0]))
+		return insertVlanHeader(data, int(hv1.tp_vlan_tci), opts)
+	} else {
+		return makeSlice(
+			uintptr(unsafe.Pointer(w.packet))+uintptr(tpAlign(int(C.sizeof_struct_tpacket3_hdr))),
+			int(w.packet.tp_len))
+	}
+}
+func (w *v3wrapper) putData(data []byte) {
+	d := makeSlice(uintptr(unsafe.Pointer(w.packet))+uintptr(tpAlign(int(C.sizeof_struct_tpacket3_hdr))), len(data))
+	copy(d, data)
+	w.packet.tp_len = C.uint(len(data))
+	w.packet.tp_next_offset = 0
+	w.packet.tp_status = unix.TP_STATUS_SEND_REQUEST
 }
 func (w *v3wrapper) getLength() int {
 	return int(w.packet.tp_len)
 }
 func (w *v3wrapper) getIfaceIndex() int {
+	if !w.rx {
+		return -1
+	}
+
 	ll := (*C.struct_sockaddr_ll)(unsafe.Pointer(uintptr(unsafe.Pointer(w.packet)) + uintptr(tpAlign(int(C.sizeof_struct_tpacket3_hdr)))))
 	return int(ll.sll_ifindex)
 }
 func (w *v3wrapper) next() bool {
+	if !w.rx {
+		return false
+	}
+
 	w.used++
 	if w.used >= w.blockhdr.num_pkts {
 		return false

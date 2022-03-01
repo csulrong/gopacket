@@ -48,9 +48,16 @@ func newAfpacketHandle(device string, snaplen int, block_size int, num_blocks in
 
 	if device == "any" {
 		h.TPacket, err = afpacket.NewTPacket(
-			afpacket.OptFrameSize(snaplen),
-			afpacket.OptBlockSize(block_size),
-			afpacket.OptNumBlocks(num_blocks),
+			afpacket.RxRingOptions{
+				FrameSize: snaplen,
+				BlockSize: block_size,
+				NumBlocks: num_blocks,
+			},
+			afpacket.TxRingOptions{
+				FrameSize: snaplen,
+				BlockSize: block_size,
+				NumBlocks: num_blocks,
+			},
 			afpacket.OptAddVLANHeader(useVLAN),
 			afpacket.OptPollTimeout(timeout),
 			afpacket.SocketRaw,
@@ -58,9 +65,16 @@ func newAfpacketHandle(device string, snaplen int, block_size int, num_blocks in
 	} else {
 		h.TPacket, err = afpacket.NewTPacket(
 			afpacket.OptInterface(device),
-			afpacket.OptFrameSize(snaplen),
-			afpacket.OptBlockSize(block_size),
-			afpacket.OptNumBlocks(num_blocks),
+			afpacket.RxRingOptions{
+				FrameSize: snaplen,
+				BlockSize: block_size,
+				NumBlocks: num_blocks,
+			},
+			afpacket.TxRingOptions{
+				FrameSize: snaplen,
+				BlockSize: block_size,
+				NumBlocks: num_blocks,
+			},
 			afpacket.OptAddVLANHeader(useVLAN),
 			afpacket.OptPollTimeout(timeout),
 			afpacket.SocketRaw,
